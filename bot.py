@@ -19,8 +19,21 @@ import boto3 # <--- NEW IMPORT (We will use this for AWS soon)
 
 # Load the environment variables
 load_dotenv()
+# --- BOT MEMORY ---
 conversation_history = {}
 active_chess_games = {}
+active_game_states = {} # <--- Tracks the status of ANY game you play!
+
+def get_seraphina_prompt(uid):
+    """Dynamically builds Seraphina's personality AND injects what she sees in the text chat!"""
+    base_prompt = "You are Seraphina, a friendly, witty Discord companion. Keep your responses short, conversational, and natural. NEVER use emojis, emoticons, or special characters in your responses."
+    
+    # If the user is playing a game in text chat, tell her about it!
+    if uid in active_game_states:
+        current_game = active_game_states[uid]
+        base_prompt += f" IMPORTANT CONTEXT: You are currently playing {current_game['name']} with the user in the text channel. The current status is: {current_game['state']}."
+        
+    return [{"text": base_prompt}]
 # --- VAD (Voice Activity Detection) Memory ---
 audio_buffers = {}       # Stores the raw audio bytes while you talk
 last_packet_times = {}   # Tracks the exact millisecond you last made a sound
@@ -63,6 +76,24 @@ def my_audio_callback(user, data: voice_recv.VoiceData):
 async def chess_game(ctx):
     """The main command group for playing chess."""
     await ctx.send("♟️ Use `!chess_game start` to begin a game, and `!chess_game move e2e4` to play!")
+
+@bot.command()
+async def flip(ctx, guess: str):
+    """A simple coin flip game to test her generic memory!"""
+    result = random.choice(["heads", "tails"])
+    
+    if guess.lower() == result:
+        outcome = "The user guessed correctly and won!"
+        await ctx.send(f"It's {result}! You win! 🎉")
+    else:
+        outcome = "The user guessed wrong and lost."
+        await ctx.send(f"It's {result}! You lose. 😔")
+        
+    # Inject this new game into her brain!
+    active_game_states[ctx.author.id] = {
+        "name": "Coin Toss",
+        "state": f"You just flipped a coin. {outcome}"
+    }
 
 @chess_game.command()
 async def start(ctx):
@@ -107,6 +138,8 @@ async def move(ctx, user_move: str):
     if board.is_checkmate():
         await ctx.send(f"Checkmate! You beat me, {ctx.author.name}! 🎉")
         del active_chess_games[ctx.author.id]
+        if ctx.author.id in active_game_states:          
+            del active_game_states[ctx.author.id]         
         return
 
     # --- 2. SERAPHINA'S TURN (STOCKFISH ENGINE) ---
@@ -133,6 +166,8 @@ async def move(ctx, user_move: str):
         board_text = f"```text\n{board}\n```"
         await ctx.send(f"Checkmate! I win! Better luck next time. 😉\n{board_text}")
         del active_chess_games[ctx.author.id]
+        if ctx.author.id in active_game_states:
+            del active_game_states[ctx.author.id]
         return
 
    # --- 3. SHOW THE UPDATED BOARD ---
@@ -140,6 +175,11 @@ async def move(ctx, user_move: str):
     image_url = f"https://fen2image.chessvision.ai/{encoded_fen}"
     
     await ctx.send(f"I played **{bot_move}**. Your turn!\n{image_url}")
+    # Tell Seraphina's brain what just happened in the text chat!
+    active_game_states[ctx.author.id] = {
+        "name": "Chess",
+        "state": f"The user played {user_move}. You (Seraphina) responded by playing {bot_move}. The board FEN is {board.fen()}."
+    }
 
 @chess_game.command()
 async def stop(ctx):
@@ -147,6 +187,8 @@ async def stop(ctx):
     if ctx.author.id in active_chess_games:
         del active_chess_games[ctx.author.id]
         await ctx.send("Game stopped. I'll put the pieces away!")
+    if ctx.author.id in active_game_states:           
+            del active_game_states[ctx.author.id]
     else:
         await ctx.send("We aren't playing right now!")
 
@@ -250,8 +292,9 @@ async def send_to_nova_and_speak(uid, input_filename):
     }
 
     payload = {
-        "system": [{"text": "You are Seraphina, a friendly, witty Discord companion. Keep your responses short, conversational, and natural. NEVER use emojis, emoticons, or special characters in your responses."}],
-        "messages": conversation_history[uid] # <--- Sending the whole memory!
+        # 🚨 THE MAGIC FIX: She now "sees" the game states every time she speaks!
+        "system": get_seraphina_prompt(uid), 
+        "messages": conversation_history[uid]
     }
 
     try:
@@ -346,7 +389,8 @@ def get_nova_response(user_id, user_text):
             conversation_history[user_id].pop(0) # Remove the dangling assistant message
     # 3. Send the ENTIRE memory list to Amazon instead of just the new text
     payload = {
-        "system": [{"text": "You are Seraphina, a friendly and helpful assistant who loves chatting and playing games on Discord."}],
+        # 🚨 THE FIX: Use the dynamic prompt here so she sees the game in text chat too!
+        "system": get_seraphina_prompt(user_id), 
         "messages": conversation_history[user_id], 
         "inferenceConfig": {
             "maxTokens": 512,
